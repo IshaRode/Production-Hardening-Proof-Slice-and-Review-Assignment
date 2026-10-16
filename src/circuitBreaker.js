@@ -27,6 +27,9 @@ class CircuitOpenError extends Error {
 }
 
 function createCircuitBreaker(options = {}) {
+  const failureThreshold = options.failureThreshold ?? 0.5;
+  const minimumRequests = options.minimumRequests ?? 5;
+  const openMillis = options.openMillis ?? 10000;
   const now = options.now ?? Date.now;
   const onStateChange = options.onStateChange ?? function () {};
 
@@ -38,12 +41,67 @@ function createCircuitBreaker(options = {}) {
   };
 
   let state = 'CLOSED';
+  let calls = 0;
+  let failures = 0;
+  let openedAt = 0;
+  let probeInFlight = false;
+
+  function transitionTo(newState) {
+    state = newState;
+    if (newState === 'OPEN') {
+      openedAt = now();
+      metrics.breaker_open_total++;
+    } else if (newState === 'CLOSED') {
+      calls = 0;
+      failures = 0;
+    }
+    onStateChange(state);
+  }
 
   async function exec(fn) {
-    // TODO: Replace this pass-through with real circuit-breaker logic so that
-    // the supplied tests pass. Right now every call goes straight through and
-    // the breaker never opens.
-    return fn();
+    if (state === 'OPEN') {
+      if (now() - openedAt >= openMillis) {
+        transitionTo('HALF_OPEN');
+      } else {
+        metrics.short_circuited_total++;
+        throw new CircuitOpenError();
+      }
+    }
+
+    if (state === 'HALF_OPEN') {
+      if (probeInFlight) {
+        metrics.short_circuited_total++;
+        throw new CircuitOpenError();
+      }
+      probeInFlight = true;
+      try {
+        const result = await fn();
+        metrics.success_total++;
+        transitionTo('CLOSED');
+        return result;
+      } catch (err) {
+        metrics.failure_total++;
+        transitionTo('OPEN');
+        throw err;
+      } finally {
+        probeInFlight = false;
+      }
+    }
+
+    // CLOSED state
+    calls++;
+    try {
+      const result = await fn();
+      metrics.success_total++;
+      return result;
+    } catch (err) {
+      failures++;
+      metrics.failure_total++;
+      if (calls >= minimumRequests && failures / calls >= failureThreshold) {
+        transitionTo('OPEN');
+      }
+      throw err;
+    }
   }
 
   return {

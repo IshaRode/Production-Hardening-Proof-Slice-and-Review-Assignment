@@ -40,18 +40,29 @@ The breaker must:
 - increment `metrics.breaker_open_total` on every trip and call `onStateChange(state)` on every
   transition.
 
-## What to submit
+## Production Hardening Summary
 
-Open a pull request on a branch named `production-hardening-slice`, and in your README include these
-labelled sections:
+### 1. Risk addressed
+Prevents cascading failure and resource exhaustion caused by doomed requests piling up when the external model provider is slow or failing.
 
-1. **Risk addressed**
-2. **Chosen control**
-3. **How to run / test**
-4. **Evidence** (a reviewer can confirm it works without reading all your code)
-5. **Observability note** (which metric moves and which state changes are logged)
-6. **Trade-off**
-7. **Remaining risk**
-8. **How this production control protects my Modules 1–3 design**
+### 2. Chosen control
+A three-state circuit breaker (`CLOSED`, `OPEN`, `HALF_OPEN`) with threshold tripping and probe recovery, implemented in [`src/circuitBreaker.js`](./src/circuitBreaker.js).
 
-Submit the pull-request URL.
+### 3. How to run / test
+Run `node --test` (or `npm test`); expected result is all 8 automated unit tests passing with zero failures.
+
+### 4. Evidence
+`test/circuitBreaker.test.js` proves requests short-circuit immediately without invoking the dependency when open, and `test/replyService.test.js` proves users safely receive `FALLBACK_TEXT`.
+
+### 5. Observability note
+Increments `metrics.breaker_open_total` when tripping, increments `metrics.short_circuited_total` on blocked calls, and invokes `onStateChange(state)` (`OPEN`, `HALF_OPEN`, `CLOSED`) without exposing payloads or secrets.
+
+### 6. Trade-off
+Temporarily routes traffic to fallback support queues during the `openMillis` window even if the provider recovers before the cooldown expires.
+
+### 7. Remaining risk
+Maintains state locally in-process (not distributed across multiple worker replicas) and still relies on an upstream call timeout for hung connections.
+
+### 8. How this production control protects my Modules 1–3 design
+Protects PromptPilot's core availability contract by isolating external AI dependency failures and ensuring support reply generation degrades gracefully to human triage.
+
